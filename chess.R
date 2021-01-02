@@ -439,14 +439,6 @@ chess_test <- testing(chess_split)
 set.seed(101)
 chess_bootstrap <- bootstraps(chess_train, strata = winner)
 
-#' 
-## ----logisticRegression, include=FALSE, eval=FALSE-------------------------------
-## # Create the recipe
-## multireg_recipe <- recipe(formula = winner ~ ., data = chess_train) %>%
-##   # We have too many factors in the opening and increment_code columns, so let's
-##   # lump some of them
-##   step_other(opening, increment_code, threshold = 0.01)
-## 
 
 #' 
 ## ----glmnet, cache=TRUE----------------------------------------------------------

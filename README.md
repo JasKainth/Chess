@@ -49,9 +49,9 @@ Below is a plot showing the openings. It should be noted that each top 10 is com
 
 In this section, we will attempt to predict the winner of the game. We will use [Tidymodels](https://www.tidymodels.org/) to create the models. We will attempt multiple classification techniques to find the best model for our data. 
 
-### Multinomial Regression  
+### Multinomial Naive Bayes Classifier  
 
-The first model which we create is a multinomial regression. For this model we use the Elo ratings, the opening played, the time control & whether the game is rated or not as predictors.  
+The first model which we create is a multinomial naive Bayes classifier. For this model we use the Elo ratings, the opening played, the time control & whether the game is rated or not as predictors.  
 
 The plot below shows the results of our model, the x-axis representing the predicted result and the facets representing the expected results.  
 
@@ -59,3 +59,12 @@ The plot below shows the results of our model, the x-axis representing the predi
 
 
 We find that when the expected winner is white, our model performs quite well. However, when the expected winner is black, it does not do as well (however, the accuracy is still above 50%). One interesting point is that our model never predicts the outcome to be a draw.
+
+### Random Forest Classifier  
+
+For the second model, we create a random forest, using the same predictors as the previous model. Below, we see a similar plot to the one above, outlining our results from this model. 
+
+![randomForest_plot](https://github.com/JasKainth/Chess/blob/main/randomForest_outcomes.jpg) 
+
+Similarly to the previous model, we see that our model does not predict any draws. However, the random forest model does a better job at predicting when black wins whereas the multinomial classifier does a better job at predicting when white wins.
+

@@ -1,0 +1,679 @@
+---
+title: "Chess"
+author: "Jas Kainth"
+date: "28/12/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+library(tidyverse)
+library(ggsci)
+library(tidytext)
+library(scales)
+library(tidymodels)
+library(usemodels)
+# Suppress summarise info
+options(dplyr.summarise.inform = FALSE)
+```
+
+# Getting the data ready  
+
+```{r data}
+# Load in the data
+chess_raw <- read_csv("games.csv") %>% 
+  # Make the id more readable
+  mutate(id = row_number())
+# Let's categorize the most common increments
+rapid <- c("10+0", "15+0", "5+5", "5+8", "8+0", "10+5", "15+10", "20+0",
+           "10+10", "15+5", "7+2", "10+2", "5+10", "10+3", "10+8", "10+15",
+           "15+2")
+classic <- c("15+15", "30+0", "30+30", "25+0", "20+10")
+chess_df <- chess_raw %>% 
+  # Create a column for the formats
+  # We only include the ones that appear 100 times or more
+  mutate(format = case_when(increment_code %in% rapid ~ "Rapid",
+                            increment_code %in% classic ~ "Classic")) %>%
+  # Create a column for opening, take the opening_name and remove everything
+  # after the colon as that indicates the variation and we might only want to 
+  # look at the opening
+  mutate(opening = str_remove(opening_name, ":.*")) %>% 
+  # We also have some '|', so we will remove those too
+  mutate(opening = str_remove(opening, "\\|.*")) %>%
+  # Create a column for the difference between the white and black elo
+  mutate(elo_difference = abs(white_rating - black_rating),
+         higher = case_when(black_rating > white_rating ~ "Black",
+                            white_rating > black_rating ~ "White",
+                            TRUE ~ "Equal")) %>%
+  # Create a column for the level of play, we will classify them as
+  # Beginner: Less than 1200
+  # Intermediate: Less than 1800
+  # Expert: More than 1800
+  # For this we will also make sure the difference between the players is 
+  # less than 300 because otherwise it may be a total mismatch
+  # We will consider the higher player for the levels
+  # Idealy there would be another level, we could do 1800 to 2400 and then
+  # greater than 2400 but we do not have a lot of games with an elo rating of
+  # that high
+  mutate(highest_elo = case_when(white_rating > black_rating ~ white_rating,
+                                 TRUE ~ black_rating),
+         level = case_when(highest_elo < 1200 ~ "Beginner",
+                           highest_elo < 1800 ~ "Intermediate",
+                           TRUE ~ "Expert"),
+         level = case_when(elo_difference < 300 ~ level)) %>%
+  # Filter out the games that have fewer than 10 turns, these are most likely
+  # games where the result was decide prior to the game
+  filter(turns >= 10) %>%
+  # Let's clean up the victory_status column
+  mutate(victory_status = case_when(victory_status == "draw" ~ "Draw",
+                                    victory_status == "mate" ~ "Checkmate",
+                                    victory_status == "resign" ~ "Resign",
+                                    TRUE ~ "Out of Time"),
+         # And the Winner column
+         winner = str_to_title(winner))
+
+# Let's make a final dataframe of the relevant columns
+chess <- chess_df %>%
+  select(id, rated, white_id, white_rating, black_id, black_rating,
+         elo_difference, opening_name, opening, opening_ply, level, format, 
+         increment_code, higher, victory_status, turns, moves, winner)
+
+```
+
+So for the data, we got the data from Kaggle. When preprocessing the data, the first thing we do is redo the ID column (before it was a random string but we just rename it row number). We also categorize the most common increments. This may be useful later when we analyze the openings based on the increment or the format, as the increment may not have a lot of games within each particular one. Then, for the openings, we only take the name of the opening rather than looking at each particular line. For example, in the Sicilian Defense, we have the Sveshnikov Variation, the Classic Sicilian, the Closed Sicilian and so many more. So rather than taking a look at each of them, we just take the common name, in this case, the Sicilian Defense, and take a look at that. We also categorize the games based on the ELO rating. If the Elo rating for the higher-rated player is less than 1200 then it is classified as a 'Beginner' game, if it is greater than 1200 but less than 1800 then is it classified as an 'Intermediate' game, and if the rating is higher than 1800 then an 'Expert' game. It should be noted that these breaks are completely arbitrary and if we had more games, especially with higher ratings, then we may have also wanted to split it after 2400, but we already do not have a lot of games higher than 1800 so we did not create a separate category for that. Also, if the difference in Elo rating is greater than 300, then we did not classify it as any level. We also filter out games that have lower than 10 moves as those may be scholar mates or one player may have not played. 
+
+
+# Exploratory Data Analysis (EDA)
+
+## Let's take a look at the openings 
+
+```{r opening, fig.height=6, fig.width=10, fig.align='center'}
+# What are the most popular openings?
+chess %>% 
+  count(opening, sort = TRUE) %>% 
+  head(15) %>%
+  mutate(opening = fct_reorder(opening, n)) %>%
+  ggplot(aes(x = n, y = opening)) + 
+  geom_col() + 
+  theme_minimal() + 
+  theme(text = element_text("Avenir Next Condensed")) +
+  labs(title = "What openings are played the most often?",
+       x = " ", 
+       y = " ") + 
+  scale_x_continuous(expand = c(0, 0))
+```
+
+```{r openingLevel, fig.height=6, fig.width=10, fig.align='center'}
+# How does this change with the different levels?
+chess %>% 
+  filter(!is.na(level)) %>%
+  add_count(level, name = "total_games") %>% 
+  group_by(level, opening) %>% 
+  summarise(number_of_games = n(),
+            total_games = total_games) %>%
+  ungroup() %>%
+  distinct() %>%
+  group_by(level) %>%
+  slice_max(order_by = number_of_games, n = 10, with_ties = FALSE) %>%
+  mutate(prop = number_of_games / total_games) %>%
+  ungroup() %>%
+  mutate(level = glue::glue("{ level } ({ total_games } Games)")) %>%
+  mutate(opening = reorder_within(opening, by = prop, within = level)) %>%
+  ggplot(aes(x = prop, y = opening, fill = level)) +
+  geom_col() + 
+  theme_minimal() + 
+  theme(legend.position = "none",
+        text = element_text("Avenir Next Condensed")) +
+  facet_wrap(~ level, scales = "free_y") + 
+  scale_y_reordered() + 
+  scale_x_continuous(labels = percent) +
+  scale_fill_futurama() +
+  labs(title = "Openings played based on level",
+       x = "Proportion of games at each level playing specific openings",
+       y = " ")
+```
+
+
+```{r outcome, fig.height=6, fig.width=10, fig.align='center'}
+# How do the games tend to end based on the opening (we won't look at this based
+# on level since there won't be a lot of data in each group)
+chess %>% 
+  add_count(opening, name = "total_games") %>%
+  group_by(opening) %>% 
+  add_count(victory_status, name = "outcome") %>% 
+  ungroup() %>%
+  select(opening, victory_status, total_games, outcome) %>%
+  distinct() %>%
+  arrange(desc(total_games)) %>% 
+  head(40) %>%
+  mutate(pct = outcome / total_games) %>%
+  # We will create a column with the percent of checkmates 
+  # We do this so we can later reorder the openings based on the highest values
+  # of percent of games ending with checkmate
+  group_by(opening) %>%
+  mutate(pct_checkmate = pct[victory_status == "Checkmate"]) %>%
+  ungroup() %>%
+  mutate(opening = glue::glue("{ opening } ({ total_games } Games)")) %>%
+  mutate(victory_status = fct_relevel(victory_status, "Draw", "Out of Time",
+                                      "Resign"),
+         opening = fct_reorder(opening, pct_checkmate)) %>%
+  ggplot(aes(x = pct, y = opening, fill = victory_status)) + 
+  geom_col() +
+  guides(fill = guide_legend(reverse = TRUE)) + 
+  theme_minimal() +
+  theme(text = element_text("Avenir Next Condensed"),
+        panel.grid.major = element_line("white", size = 0.5),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(),
+        panel.ontop = TRUE) + 
+  scale_x_continuous(labels = percent,
+                     expand = c(0, 0)) + 
+  scale_fill_futurama() +
+  labs(title = "Outcomes based on Openings",
+       x = "Percent of Games",
+       y = " ",
+       fill = "Outcome")
+
+```
+
+```{r theory, fig.height=6, fig.width=10, fig.align='center'}
+# Which openings have the most amount of theory moves
+chess %>% 
+  arrange(desc(opening_ply)) %>% 
+  head(25) %>% 
+  select(opening_ply, opening, id) %>%
+  mutate(for_axis = glue::glue("{ opening } - Match ID: { id }")) %>%
+  mutate(for_axis = fct_reorder(for_axis, opening_ply)) %>%
+  ggplot(aes(x = opening_ply, y = for_axis, fill = opening)) + 
+  geom_col() + 
+  labs(title = "Which games contained the most opening moves based on theory?",
+       x = "# of Moves",
+       y = " ") + 
+  theme_minimal() + 
+  theme(text = element_text("Avenir Next Condensed"),
+        legend.position = "none") +
+  scale_fill_lancet() + 
+  scale_x_continuous(expand = c(0, 0))
+```
+
+```{r theoryLevel, fig.height=6, fig.width=10, fig.align='center'}
+# What are the most moves based on theory per level?
+chess %>% 
+  filter(!is.na(level)) %>%
+  mutate(opening = str_remove(opening, "\\|.*")) %>%
+  group_by(level, opening) %>%
+  summarise(theory_moves = mean(opening_ply)) %>%
+  ungroup() %>%
+  group_by(level) %>%
+  slice_max(order_by = theory_moves, n = 10, with_ties = FALSE) %>%
+  mutate(opening = reorder_within(opening, by = theory_moves, within = level)) %>%
+  ggplot(aes(x = theory_moves, y = opening, fill = level)) + 
+  geom_col() + 
+  facet_wrap(~ level, scales = "free_y") + 
+  scale_y_reordered() + 
+  theme_minimal() +
+  theme(text = element_text("Avenir Next Condensed"),
+        legend.position = "none") + 
+  scale_fill_futurama() + 
+  labs(title = "# of beginning moves played on theory", 
+       x = " ",
+       y = " ")
+```
+
+```{r rated, fig.height=6, fig.width=10, fig.align='center'}
+# Is there a difference in which openings are played if the games are rated or 
+# not? Some openings may be a bit more fun but also more difficult to play so we
+# may see those played more often with unrated games
+chess %>% 
+  group_by(rated) %>% 
+  count(opening) %>% 
+  summarise(opening = opening,
+            scenario = n,
+            total_games = sum(n)) %>%
+  ungroup() %>%
+  mutate(pct = scenario / total_games) %>% 
+  group_by(rated) %>% 
+  slice_max(order_by = pct, n = 15, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(rated = case_when(rated ~ "Rated",
+                           TRUE ~ "Unrated"),
+         opening = reorder_within(opening, by = pct, within = rated)) %>%
+  ggplot(aes(x = pct, y = opening, fill = rated)) + 
+  geom_col() + 
+  theme_minimal() +
+  theme(text = element_text("Avenir Next Condensed"),
+        legend.position = "none") +
+  facet_wrap(~ rated, scales = "free_y") + 
+  scale_y_reordered() + 
+  scale_x_continuous(labels = percent) +
+  scale_fill_lancet() + 
+  labs(title = "What openings are most common among rated and unrated games?",
+       x = "% of Games",
+       y = " ")
+
+```
+
+After taking a look at all the plots above, it is abundantly clear that the Sicilian Defense is the most common opening. Only in a few plots (like the 'Opening played based on Level' plot for the Beginner facet) is Sicilian not the number 1 opening. 
+
+However, if we take a look at the 'Outcomes Based on Openings' plot, we see that the King's Pawn game results in the most often checkmates. This may just be due to the fact that this opening is the most common among beginners and those levels may have the move amount of checkmates. 
+
+## Let's take a look at Elo ratings
+
+```{r higherElo, fig.height=6, fig.width=10, fig.align='center'}
+# How often does the higher rated player win?
+chess %>% 
+  count(higher, winner) %>% 
+  group_by(higher) %>% 
+  summarise(total_games = sum(n),
+            scenario = n,
+            winner = winner) %>% 
+  ungroup() %>% 
+  mutate(pct = scenario / total_games,
+         higher = glue::glue("{ higher } ({ total_games } Games)")) %>%
+  ggplot(aes(x = pct, y = higher, fill = winner)) + 
+  geom_col() +
+  guides(fill = guide_legend(reverse = TRUE)) + 
+  theme_minimal() + 
+  theme(text = element_text("Avenir Next Condensed")) + 
+  scale_fill_futurama() + 
+  scale_x_continuous(labels = percent,
+                     expand = c(0, 0)) + 
+  labs(title = "How often does the higher rated player win?",
+       x = "% of Games",
+       y = "Higher rated player",
+       fill = "Winner")
+
+
+```
+
+```{r higherEloLevel, fig.height=12, fig.width=10, fig.align='center'}
+# How does the plot above change by the different levels?
+chess %>% 
+  filter(!is.na(level)) %>%
+  count(higher, winner, level) %>% 
+  group_by(higher, level) %>% 
+  summarise(total_games = sum(n),
+            scenario = n,
+            winner = winner) %>% 
+  ungroup() %>% 
+  mutate(pct = scenario / total_games,
+         higher = glue::glue("{ higher } ({ total_games } Games)")) %>% 
+  ggplot(aes(x = pct, y = higher, fill = winner)) + 
+  geom_col() +
+  guides(fill = guide_legend(reverse = TRUE)) + 
+  theme_minimal() + 
+  theme(text = element_text("Avenir Next Condensed")) + 
+  scale_fill_futurama() + 
+  scale_x_continuous(labels = percent,
+                     expand = c(0, 0)) + 
+  labs(title = "How often does the higher rated player win within each level?",
+       x = "% of Games",
+       y = "Higher rated player",
+       fill = "Winner") + 
+  facet_wrap(~ level, scales = "free_y", ncol = 1)
+  
+```
+
+```{r eloDifference, fig.height=8, fig.width=10, fig.align='center'}
+# Let's take a look at the elo difference column 
+# For this we won't split it up into groups with the level 
+# Let's filter out the games with an elo difference of greater than 900
+chess %>% 
+  filter(elo_difference < 900) %>% 
+  filter(higher != "Equal") %>%
+  # Let's make ranges for the Elo difference 
+  # We will go up by 100
+  mutate(elo_range = paste0("Elo Difference <=", 
+                            floor(elo_difference / 100) * 100)) %>% 
+  group_by(elo_range) %>% 
+  count(winner, higher) %>% 
+  ungroup() %>%
+  group_by(elo_range, higher) %>%
+  summarise(winner = winner,
+            scenario = n,
+            total_games = sum(n)) %>%
+  ungroup() %>% 
+  mutate(pct = scenario / total_games) %>%
+  ggplot(aes(x = pct, y = higher, fill = winner)) +
+  geom_col() +
+  facet_wrap(~ elo_range) + 
+  guides(fill = guide_legend(reverse = TRUE)) + 
+  theme_minimal() + 
+  theme(text = element_text("Avenir Next Condensed")) + 
+  scale_fill_futurama() + 
+  scale_x_continuous(labels = percent,
+                     expand = c(0, 0)) + 
+  labs(title = "How often does the higher rated player win?",
+       x = "% of Games",
+       y = "Higher rated player",
+       fill = "Winner")
+
+```
+
+We see that the higher-rated player does tend to win the most often. This is shown in the most recent 'How often does the higher-rated player win?' plot. Each facet represents a group of players which is decided based on their Elo rating difference. The first facet is for players whose Elo rating difference is between 0 and 99, the second for players whose Elo rating difference is between 100 and 199, etc. As the difference begins to grow, the higher-rated player is more and more likely to win.
+
+## Let's take a look at the format and Increment
+
+```{r EloOpeningIncrement, fig.height=8, fig.width=10, fig.align='center'}
+# Are there some openings that are more popular among different incrememnts?
+chess %>% 
+  add_count(increment_code, name = "total_games") %>% 
+  # Take the top 6
+  filter(total_games >= 575) %>%
+  group_by(increment_code) %>%
+  add_count(opening, name = "times_opening_played") %>%
+  distinct(opening, times_opening_played, increment_code, total_games) %>%
+  slice_max(order_by = times_opening_played, n = 10, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(pct = times_opening_played / total_games,
+         increment_code = glue::glue("{ increment_code } ({ total_games } Games)"),
+         opening = reorder_within(opening, by = pct, within = increment_code)) %>%
+  ggplot(aes(x = pct, y = opening, fill = increment_code)) + 
+  geom_col() + 
+  theme_minimal() + 
+  theme(legend.position = "none",
+        text = element_text("Avenir Next Condensed")) +
+  facet_wrap(~ increment_code, scales = "free_y") + 
+  scale_y_reordered() + 
+  scale_x_continuous(label = percent,
+                     expand = c(0, 0)) +
+  scale_fill_lancet() + 
+  labs(title = "Which openings are most popular in certain formats?",
+       x = "Percent of Games",
+       y = " ")
+
+```
+
+```{r EloOpeningFormat, fig.height=8, fig.width=10, fig.align='center'}
+# We classified the games into either Classic or Rapid, so let's take a look at that
+chess %>% 
+  filter(!is.na(format)) %>%
+  add_count(format, name = "total_games") %>%
+  group_by(format) %>%
+  add_count(opening, name = "times_played") %>%
+  distinct(format, opening, total_games, times_played) %>%
+  mutate(pct = times_played / total_games) %>%
+  slice_max(order_by = pct, n = 10, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(format = glue::glue("{ format } ({ total_games } Games)"),
+         opening = reorder_within(opening, by = pct, within = format)) %>%
+  ggplot(aes(x = pct, y = opening, fill = format)) + 
+  geom_col() +
+  theme_minimal() +
+  theme(legend.position = "none",
+        text = element_text("Avenir Next Condensed")) +
+  facet_wrap(~ format, scales = "free_y") + 
+  scale_y_reordered() + 
+  scale_x_continuous(labels = percent,
+                     expand = c(0, 0)) + 
+  scale_fill_lancet() +
+  labs(title = "Which openings are most popular among different formats?",
+       x = "Percent of Games",
+       y = " ")
+
+```
+
+As we see again, the most common opening for each category is the Sicilian Defense. 
+
+# Statistical Analysis
+
+Let's try to create a machine-learning model to predict the winner.  
+
+When we predict the winner, we will attempt to predict it when all the moves of theory have been played (i.e. when we have a 'new game'). This means we will have the players' Elo ratings, the colour they play, the increment code if the game was rated or not & the opening that was played (since we can determine the opening after the moves of theory have been played). These are going to be the predictors that we use to create our models. 
+
+## Data Setup
+
+```{r Datasetup}
+# We will use tidymodels to try and predict the winner
+# First, let's choose the appropriate the columns and apply any transformations we
+# may need
+# First, let's take the variables that we might think may be useful later on
+chess_ml <- chess %>% 
+  select(rated, white_rating, black_rating, opening, increment_code, winner) %>%
+  # There are a lot of variables which are correlated with each other
+  # For example if we take white rating, black rating and also elo_difference, 
+  # these are directly related to one another so we should not include 
+  # elo_difference
+  # Turn the characters into factors 
+  mutate(rated = case_when(rated ~ "Yes",
+                           TRUE ~ "No")) %>%
+  mutate_if(is.character, factor) %>% 
+  drop_na()
+```
+
+```{r trainTestSplit}
+set.seed(100)
+# Let's create a train/test split
+chess_split <- initial_split(chess_ml, strata = winner)
+chess_train <- training(chess_split)
+chess_test <- testing(chess_split)
+
+# Let's also create samples (using bootstraps), this will come in handy when we need # to tune the parameters of some of our models
+set.seed(101)
+chess_bootstrap <- bootstraps(chess_train, strata = winner)
+```
+
+The first thing we do is select the appropriate columns. We want to drop the NA values since in this case, it doesn't make a lot of sense to impute them (they are probably not missing at random). Then, we want to turn all of the character columns into factors, since that is the input required for our machine learning models. 
+
+Then, we split our data into a training set and test set. Then, we also want to create some resamples, so we can use these to tune our models. We make these from our training set, not the full dataset. 
+
+## Multinomial Naive Bayes Classifier
+
+
+```{r glmnet}
+# Create the recipe
+glmnet_recipe <- 
+  recipe(formula = winner ~ ., data = chess_train) %>% 
+  step_novel(all_nominal(), -all_outcomes()) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) 
+
+# Create the spec
+glmnet_spec <- 
+  multinom_reg(penalty = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet") 
+
+# Create a workflow
+glmnet_workflow <- 
+  workflow() %>% 
+  add_recipe(glmnet_recipe) %>% 
+  add_model(glmnet_spec) 
+
+# Tune the parameters
+# We will also add a parallel backend so it will run more quickly
+glmnet_grid <- tidyr::crossing(penalty = 10^seq(-6, -1, length.out = 10)) 
+set.seed(102)
+doParallel::registerDoParallel()
+# Save the model so we don't have to retune it everytime we run the code
+# glmnet_tune <- 
+#   tune_grid(glmnet_workflow, 
+#             resamples = chess_bootstrap, 
+#             grid = glmnet_grid) 
+# saveRDS(glmnet_tune, "glmnet_tune.rds")
+glmnet_tune <- readRDS("glmnet_tune.rds")
+# Ok, what is our best model?
+show_best(glmnet_tune, metric = "roc_auc") %>% 
+  select(Penalty = penalty, Metric = .metric, Estimator = .estimator, 
+         Mean = mean, n, `Std Error` = std_err) %>%
+  knitr::kable(caption = "What penalty term has the best roc score?")
+show_best(glmnet_tune, metric = "accuracy") %>% 
+  select(Penalty = penalty, Metric = .metric, Estimator = .estimator, 
+         Mean = mean, n, `Std Error` = std_err) %>%
+  knitr::kable(caption = "What penalty term has the best accuracy?")
+
+# The good thing is that both of these have the same value
+# The bad thing is that neither of them is particularly good
+
+autoplot(glmnet_tune) + 
+  theme_bw() +
+  theme(strip.background=element_rect(fill="white")) + 
+  labs(title = "Metric value with different penalty values",
+       x = "Penalty",
+       y = " ")
+
+# Let's create our final model, using the penalty value of the best model
+# we have, relative to those two metrics
+# First finalize the workflow
+glmnet_final_workflow <- glmnet_workflow %>%
+  finalize_workflow(select_best(glmnet_tune, metric = "roc_auc"))
+
+# Now create the final fit
+glmnet_fit <- last_fit(glmnet_final_workflow, chess_split)
+
+# Let's take a look at the metrics
+collect_metrics(glmnet_fit) %>% 
+  select(Metric = .metric, Estimate = .estimate) %>%
+  knitr::kable(caption = "Metrics of our final model on the test set")
+
+# Let's take a look at the predictions
+# Confusion Matrix
+collect_predictions(glmnet_fit) %>% 
+  select(.pred_class, winner) %>% 
+  table() %>% 
+  knitr::kable(caption = "Confusion Matrix for predictions")
+  
+```
+
+```{r glmnetVisual, fig.height=8, fig.width=10, fig.align='center'}
+# Visual Results
+collect_predictions(glmnet_fit) %>% 
+  group_by(winner) %>% 
+  add_count(.pred_class, name = "total_outcomes") %>% 
+  select(.pred_class, winner, total_outcomes) %>% 
+  distinct() %>% 
+  mutate(winner = glue::glue("Excepted Result: { winner }")) %>%
+  ggplot(aes(x = .pred_class, y = total_outcomes, fill = winner)) +
+  geom_col() + 
+  geom_text(aes(label = total_outcomes, color = winner), vjust = -0.5,
+            fontface = "bold") +
+  theme_minimal() + 
+  theme(legend.position = "none",
+        text = element_text("Avenir Next Condensed")) +
+  scale_fill_lancet() +
+  scale_color_lancet() +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(0, 2000)) +
+  facet_wrap(~ winner) +
+  labs(title = "How does the predicted result compare to the expected result?",
+       subtitle = "Multinomial naive Bayes Classifier",
+       x = "Predicted Winner",
+       y = "Frequency")
+
+# Some interesting notes:
+# Out model is pretty good at predicting when white wins but not so good at
+# predicting when black wins (but still above 50%)
+# But, for some reason, it never chooses a draw which is interesting
+# We will see if we can create a better model using different classification
+# algorithms
+
+```
+
+The first model we create is our Multinomial naive Bayes Classifier. We tune the penalty term for this model. We see the resulting ![ROC](https://en.wikipedia.org/wiki/Receiver_operating_characteristic) and accuracy in the tables above. The good thing is the same penalty term results in the best model for both metrics, however, neither the accuracy nor ROC is great. We see the same result from the 'Metric value with different penalty values' plot. We also see our accuracy and ROC for our test set (along with the confusion matrix), and they are again not great.  
+
+Taking a look at the 'How does the predicted result compare to the expected result? - Multinomial naive Bayes Classifier', we see how the predicted results compare to the actual results. One interesting thing to note is that our model never predicts a Draw.
+
+## Random Forest Regression 
+
+```{r randomForest}
+ranger_recipe <- 
+  recipe(formula = winner ~ ., data = chess_train) 
+
+ranger_spec <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = 1000) %>% 
+  set_mode("classification") %>% 
+  set_engine("ranger") 
+
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(ranger_spec) 
+
+min_n_grid <- grid_regular(min_n(), levels = 4)
+tree_grid <- tidyr::crossing(min_n_grid, mtry = 2:4)
+set.seed(102)
+# ranger_tune <-
+#   tune_grid(ranger_workflow, chess_bootstrap, 
+#             grid = tree_grid)
+# saveRDS(ranger_tune, "ranger_tune.rds")
+
+ranger_tune <- readRDS("ranger_tune.rds")
+show_best(ranger_tune, metric = "roc_auc") %>% 
+  select(mtry, min_n, Metric = .metric, Estimator = .estimator, 
+         Mean = mean, n, `Std Error` = std_err) %>%
+  knitr::kable(caption = "What values of mtry and min_n have the best roc score?")
+show_best(ranger_tune, metric = "accuracy") %>% 
+  select(mtry, min_n, Metric = .metric, Estimator = .estimator, 
+         Mean = mean, n, `Std Error` = std_err) %>%
+  knitr::kable(caption = "What values of mtry and min_n have the best accuracy?")
+
+autoplot(ranger_tune) + 
+  theme_bw() +
+  theme(strip.background=element_rect(fill="white")) + 
+  labs(title = "Metric values for different values of hyperparameters",
+       y = " ")
+# The values for ROC are a bit better than the multiclass whereas for accuracy 
+# they are a bit worse. However, as we can see for the best parameters, they are not
+# the same for both of the metrics. We will choose the values that have the best 
+# value for ROC since the % change for the ROC is larger than the % change for 
+# accuracy 
+
+ranger_final_workflow <- ranger_workflow %>%
+  finalize_workflow(select_best(ranger_tune, metric = "roc_auc"))
+
+# Now create the final fit
+ranger_fit <- last_fit(ranger_final_workflow, chess_split)
+
+# Let's take a look at the metrics
+collect_metrics(ranger_fit) %>% 
+  select(Metric = .metric, Estimate = .estimate) %>%
+  knitr::kable(caption = "Metrics of our final model on the test set")
+
+# The accuracy and ROC is higher for this model than the Multinomial classifier
+
+# Let's take a look at the predictions
+# Confusion Matrix
+collect_predictions(ranger_fit) %>% 
+  select(.pred_class, winner) %>% 
+  table() %>% 
+  knitr::kable(caption = "Confusion Matrix for predictions")
+
+# We still don't predict any draws, which is weird
+```
+
+```{r randomForestVisual, fig.height=8, fig.width=10, fig.align='center'}
+# Visual Results
+collect_predictions(ranger_fit) %>% 
+  group_by(winner) %>% 
+  add_count(.pred_class, name = "total_outcomes") %>% 
+  select(.pred_class, winner, total_outcomes) %>% 
+  distinct() %>% 
+  mutate(winner = glue::glue("Excepted Result: { winner }")) %>%
+  ggplot(aes(x = .pred_class, y = total_outcomes, fill = winner)) +
+  geom_col() + 
+  geom_text(aes(label = total_outcomes, color = winner), vjust = -0.5,
+            fontface = "bold") +
+  theme_minimal() + 
+  theme(legend.position = "none",
+        text = element_text("Avenir Next Condensed")) +
+  scale_fill_lancet() +
+  scale_color_lancet() +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(0, 1800)) +
+  facet_wrap(~ winner) +
+  labs(title = "How does the predicted result compare to the expected result?",
+       subtitle = "Random Forest Classifier",
+       x = "Predicted Winner",
+       y = "Frequency")
+
+# For the draw case, both models are pretty similar
+# However, the random forest model does a better job at predicting when black wins
+# whereas the multinomial classifier does a better job at predicting when white wins
+```
+
+For the Random Forest Classifier, we tune the number of predictors that will be randomly sampled at each split (mtry) & the minimum number of data points in a node that is required for the node to be split further (min_n). Taking a look at our first two tables above, we see that our metrics are slightly better than our previous model. However, the same pair of metrics do not give us the same results, so we will choose the one that gives us the best ROC value. The reasoning for this is because the % change for the best and second-best ROC is higher than the % change for the best and second-best accuracy. The 'Metric values for different values of hyperparameters' shows us this as a plot.  
+
+When we look at the 'How does the predicted result compare to the expected result? - Random Forest Classifier', we again see that our model never predicts a draw. However, we also see that our Random Forest model does a better job at predicting when black wins whereas the Multinomial Classifier does a better job at predicting when white wins. 
